@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <fcntl.h>
+#include <ctype.h>
 
 int pid1 = 0;
 int pid2 = 0;
@@ -45,14 +47,15 @@ int main(int argc, char **argv) {
 		}
 		
 		// loop through each command
-		cmd = "";
+		cmd = malloc(1024);
 		for(i = 0; cmds[i] != NULL; i++) {
-			cmd = cmds[i];
+			strcpy(cmd, cmds[i]);
 			
 			if(strstr(cmd, "|") != NULL) {
 				char *half1 = strtok(cmd, "|");
-				char *half2 = strtok(NULL, "|");
-				
+				char *half2 = strtok(NULL, ">");
+				char *file = strtok(NULL, ">");
+
 				int fd[2];
 				pipe(fd);
 				
@@ -79,8 +82,8 @@ int main(int argc, char **argv) {
 				
 				pid1 = fork();
 				if(pid1 == 0) {
-					// pipe output and run
 					dup2(fd[1], STDOUT_FILENO);
+					// pipe output and run
 					close(fd[0]);
 					
 					if(execvp(args1[0], args1) == -1) {
@@ -93,7 +96,17 @@ int main(int argc, char **argv) {
 						// pipe input and run
 						dup2(fd[0], STDIN_FILENO);
 						close(fd[1]);
-					
+						
+						int fd1 = 0;
+						if(file != NULL){
+							while(isspace((unsigned char)*file)) file++;
+							if(strstr(cmds[i], ">>") == NULL){
+								fd1 = open(file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+							}else{
+								fd1 = open(file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+							}
+							dup2(fd1, STDOUT_FILENO);
+						}
 						if(execvp(args2[0], args2) == -1) {
 							perror(string);
 							return 0;
@@ -108,10 +121,10 @@ int main(int argc, char **argv) {
 						pid2 = 0;
 					}
 				}
-			} else if(strstr(cmd, ">>") != NULL) {
-			} else if(strstr(cmd, ">") != NULL) {
 			} else {
-				char *token = strtok(cmd, " ");
+				char *half1 = strtok(cmd, ">");
+				char *file = strtok(NULL, ">");
+				char *token = strtok(half1, " ");
 				if(token == NULL) continue;
 				
 				char **args = malloc(sizeof(char *) * 1024);
@@ -131,6 +144,16 @@ int main(int argc, char **argv) {
 				} else {
 					pid1 = fork();
 					if(pid1 == 0) {
+						int fd1 = 0;
+						if(file != NULL){
+							while(isspace((unsigned char)*file)) file++;
+							if(strstr(cmds[i], ">>") == NULL){
+								fd1 = open(file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+							}else{
+								fd1 = open(file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+							}
+							dup2(fd1, STDOUT_FILENO);
+						}
 						if(execvp(args[0], args) == -1) {
 							perror(string);
 							return 0;
