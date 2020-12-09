@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -6,24 +8,55 @@
 #include <fcntl.h>
 #include <ctype.h>
 
-int pid1 = 0;
-int pid2 = 0;
+#define NUM_PIDS 128
+int *pids;
 
+// print a new line if there are no child processes
 void interrupt(int signum) {
-	if(pid1) {
-		kill(pid1, SIGTERM);
-		printf("\n");
-	} else if(pid2) {
-		kill(pid2, SIGTERM);
-		printf("\n");
-	} else {
+	int running = 0;
+
+	int i;
+	for(i = 0; i < NUM_PIDS; i++) {
+		if(pids[i]) {
+			running = 1;
+		}
+	}
+
+	if(!running) {
 		printf("\n%s $ ", getcwd(NULL, 0));
 		fflush(stdout);
 	}
 }
 
+// split cmd_orig by delimiter using strtok()
+// uses strcpy() to avoid corrupting cmd_orig
+char **split(char *cmd_orig, char *delimiter) {
+	char *cmd = malloc(sizeof(char) * 1024);
+	strcpy(cmd, cmd_orig);
+	
+	char *token = strtok(cmd, delimiter);
+	char **tokens = malloc(sizeof(char *) * 1024);
+	
+	int i;
+	for(i = 0; token != NULL; i++) {
+		tokens[i] = token;
+		token = strtok(NULL, delimiter);
+	}
+	
+	tokens[i] = NULL;
+	
+	return realloc(tokens, sizeof(char *) * (i + 1));
+}
+
 int main(int argc, char **argv) {
 	signal(SIGINT, interrupt);
+	
+	pids = malloc(sizeof(int) * NUM_PIDS);
+	
+	int i;
+	for(i = 0; i < NUM_PIDS; i++) {
+		pids[i] = 0;	
+	}
 
 	while(1) {
 		// print prompt and receive user input
@@ -37,131 +70,96 @@ int main(int argc, char **argv) {
 		}
 		
 		// split input into list of commands separated by ;
-		char *cmd = strtok(string, ";");
-		char **cmds = malloc(sizeof(char *) * 1024);
-		
-		int i;
-		for(i = 0; cmd != NULL; i++) {
-			cmds[i] = cmd;
-			cmd = strtok(NULL, ";");
-		}
+		char **cmds = split(string, ";");
 		
 		// loop through each command
-		cmd = malloc(1024);
+		char *cmd = malloc(1024);
 		for(i = 0; cmds[i] != NULL; i++) {
 			strcpy(cmd, cmds[i]);
 			
-			if(strstr(cmd, "|") != NULL) {
-				char *half1 = strtok(cmd, "|");
-				char *half2 = strtok(NULL, ">");
-				char *file = strtok(NULL, ">");
-
-				int fd[2];
-				pipe(fd);
+			char *half1 = strtok(cmd, ">");
+			char *half2 = strtok(NULL, ">");
+			
+			char **sub_cmds = split(half1, "|");
+			
+			// find length of sub_cmds
+			int len = 0;
+			while(sub_cmds[len++]);
+			len--;
+			
+			int **pipes;
+			if(len > 1) {	
+				pipes = malloc(sizeof(int *) * (len - 1));
+			}
+			
+			// run each command in the pipe chain
+			int j;
+			for(j = 0; j < len; j++) {
+				char *sub_cmd = sub_cmds[j];
+				char **args = split(sub_cmd, " ");
 				
-				char *token = strtok(half1, " ");
-				if(token == NULL) continue;
-				
-				char **args1 = malloc(sizeof(char *) * 1024);
-				
-				int j;
-				for(j = 0; token != NULL; j++) {
-					args1[j] = token;
-					token = strtok(NULL, " ");
+				if(j < len - 1) {
+					pipes[j] = malloc(sizeof(int) * 2);
+					pipe2(pipes[j], O_CLOEXEC);
 				}
 				
-				token = strtok(half2, " ");
-				if(token == NULL) continue;
-				
-				char **args2 = malloc(sizeof(char *) * 1024);
-				
-				for(j = 0; token != NULL; j++) {
-					args2[j] = token;
-					token = strtok(NULL, " ");
-				}
-				
-				pid1 = fork();
-				if(pid1 == 0) {
-					dup2(fd[1], STDOUT_FILENO);
-					// pipe output and run
-					close(fd[0]);
+				pids[j] = fork();
+				if(pids[j] == 0) {
+					// pipe in from previous command (for all but first command)
+					if(j > 0) {
+						dup2(pipes[j - 1][0], STDIN_FILENO);
+						close(pipes[j - 1][0]);
+						close(pipes[j - 1][1]);
+					}
 					
-					if(execvp(args1[0], args1) == -1) {
-						perror(string);
+					// pipe to next command (for all but last command)
+					if(j < len - 1) {
+						dup2(pipes[j][1], STDOUT_FILENO);
+						close(pipes[j][0]);
+						close(pipes[j][1]);
+					}
+					
+					// redirect last command if > or >> is present
+					if(j == len - 1 && half2 != NULL) {
+						// remove leading spaces
+						while(isspace((unsigned char) *half2)) half2++;
+					
+						int fd = 0;
+						if(strstr(cmds[i], ">>") == NULL) {
+							printf(">\n");
+							fd = open(half2, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+						} else {
+							printf(">>\n");
+							fd = open(half2, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+						}
+						
+						dup2(fd, STDOUT_FILENO);
+					}
+
+					if(execvp(args[0], args) == -1) {
+						perror(sub_cmd);
+						
+						if(j > 0) {
+							close(pipes[j - 1][0]);
+						}
+						
+						if(j < len - 1) {
+							close(pipes[j][1]);
+						}
+						
 						return 0;
 					}
-				} else {
-					pid2 = fork();
-					if(pid2 == 0) {
-						// pipe input and run
-						dup2(fd[0], STDIN_FILENO);
-						close(fd[1]);
-						
-						int fd1 = 0;
-						if(file != NULL){
-							while(isspace((unsigned char)*file)) file++;
-							if(strstr(cmds[i], ">>") == NULL){
-								fd1 = open(file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-							}else{
-								fd1 = open(file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
-							}
-							dup2(fd1, STDOUT_FILENO);
-						}
-						if(execvp(args2[0], args2) == -1) {
-							perror(string);
-							return 0;
-						}
-					} else {				
-						waitpid(pid1, NULL, 0);
-						pid1 = 0;
-						
-						close(fd[1]);
-					
-						waitpid(pid2, NULL, 0);
-						pid2 = 0;
-					}
 				}
-			} else {
-				char *half1 = strtok(cmd, ">");
-				char *file = strtok(NULL, ">");
-				char *token = strtok(half1, " ");
-				if(token == NULL) continue;
+			}
+			
+			// wait on each sub-command and close pipes
+			for(j = 0; j < len; j++) {
+				waitpid(pids[j], NULL, 0);
+				pids[j] = 0;
 				
-				char **args = malloc(sizeof(char *) * 1024);
-				
-				int j;
-				for(j = 0; token != NULL; j++) {
-					args[j] = token;
-					token = strtok(NULL, " ");
-				}
-				
-				if(!strcmp(args[0], "cd")) {
-					if(args[1] == NULL) {
-						chdir(getenv("HOME"));
-					} else if(chdir(args[1]) == -1) {
-							perror(args[1]);
-					}
-				} else {
-					pid1 = fork();
-					if(pid1 == 0) {
-						int fd1 = 0;
-						if(file != NULL){
-							while(isspace((unsigned char)*file)) file++;
-							if(strstr(cmds[i], ">>") == NULL){
-								fd1 = open(file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-							}else{
-								fd1 = open(file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
-							}
-							dup2(fd1, STDOUT_FILENO);
-						}
-						if(execvp(args[0], args) == -1) {
-							perror(string);
-							return 0;
-						}
-					} else {
-						wait(NULL);
-						pid1 = 0;
-					}
+				if(j < len - 1) {
+					close(pipes[j][0]);
+					close(pipes[j][1]);
 				}
 			}
 		}
