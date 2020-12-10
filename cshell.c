@@ -126,10 +126,8 @@ int main(int argc, char **argv) {
 					
 						int fd = 0;
 						if(strstr(cmds[i], ">>") == NULL) {
-							printf(">\n");
 							fd = open(half2, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 						} else {
-							printf(">>\n");
 							fd = open(half2, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
 						}
 						
